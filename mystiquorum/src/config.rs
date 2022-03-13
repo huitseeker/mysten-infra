@@ -1,10 +1,15 @@
+use std::marker::PhantomData;
+
 use std::{future::Future, net::IpAddr, sync::Arc, time::Duration};
 
 use quinn::IdleTimeout;
 use rccheck::rustls;
+use rccheck::Certifiable;
 use rccheck::Psk;
-use rustls::{Certificate, ClientConfig};
+use rustls::{Certificate, ClientConfig, PrivateKey};
+
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, Bytes};
 
 /// Default for [`Config::idle_timeout`] (1 minute).
 ///
@@ -12,21 +17,45 @@ use serde::{Deserialize, Serialize};
 /// see no conversation between them.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// This type provides serialized bytes for a private key.
+///
+/// The private key must be DER-encoded ASN.1 in either
+/// PKCS#8 or PKCS#1 format.
+pub trait ToPKCS8 {
+    fn to_pkcs8_bytes(&self) -> Vec<u8>;
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CertAndKey {
+    #[serde_as(as = "Bytes")]
+    cert: Vec<u8>,
+    #[serde_as(as = "Bytes")]
+    private_key: Vec<u8>,
+}
+
+impl CertAndKey {
+    fn cert(&self) -> rustls::Certificate {
+        Certificate(self.cert.clone())
+    }
+    fn key(&self) -> rustls::PrivateKey {
+        PrivateKey(self.private_key.clone())
+    }
+}
+
 /// QuicP2p configurations
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct MachineConfig {
-    pub pki: rccheck::Psk,
+pub struct MachineConfig<Scheme> {
+    marker: PhantomData<Scheme>,
 
-    pub server_name: String,
+    key_material: CertAndKey,
+
+    server_name: String,
 
     /// External port number assigned to the socket address of the program.
-    /// considers that the local port provided has been mapped to the provided external
-    /// port number and automatic port forwarding will be skipped.
-    pub external_port: u16,
+    external_port: u16,
 
-    /// External IP address of the computer on the WAN. This field is mandatory if the node is the genesis node and
-    /// port forwarding is not available. In case of non-genesis nodes, the external IP address will be resolved
-    /// using the Echo service.
+    /// External IP address of the computer on the WAN.
     pub external_ip: Option<IpAddr>,
 
     /// How long to wait to hear from a peer before timing out a connection.
@@ -50,6 +79,41 @@ pub struct MachineConfig {
     /// Determines the retry behaviour of requests, by setting the back off strategy used.
     #[serde(default)]
     pub retry_config: RetryConfig,
+}
+
+impl<Scheme> MachineConfig<Scheme>
+where
+    Scheme: Certifiable,
+    Scheme::KeyPair: ToPKCS8,
+{
+    fn generate_cert(kp: Scheme::KeyPair, name: &str) -> Result<CertAndKey> {
+        let private_key = Scheme::KeyPair::to_pkcs8_bytes(&kp);
+        let cert = Scheme::keypair_to_certificate(vec![name.to_string()], kp)?
+            .as_ref()
+            .to_vec();
+
+        Ok(CertAndKey { cert, private_key })
+    }
+
+    pub fn new(
+        kp: Scheme::KeyPair,
+        server_name: &str,
+        external_port: u16,
+        external_ip: Option<IpAddr>,
+    ) -> Result<Self> {
+        let key_material = Self::generate_cert(kp, server_name)?;
+        let server_name = server_name.to_owned();
+        Ok(MachineConfig {
+            marker: PhantomData,
+            key_material,
+            server_name,
+            external_port,
+            external_ip,
+            idle_timeout: None,
+            keep_alive_interval: None,
+            retry_config: RetryConfig::default(),
+        })
+    }
 }
 
 /// Retry configurations for establishing connections and sending messages.
@@ -140,8 +204,8 @@ impl Default for RetryConfig {
 // Convenience alias – not for export.
 type Result<T, E = ConfigError> = std::result::Result<T, E>;
 
-impl From<rcgen::RcgenError> for ConfigError {
-    fn from(error: rcgen::RcgenError) -> Self {
+impl From<anyhow::Error> for ConfigError {
+    fn from(error: anyhow::Error) -> Self {
         Self::CertificateGeneration(CertificateGenerationError(error.into()))
     }
 }
@@ -174,63 +238,80 @@ pub enum ConfigError {
     Webpki,
 }
 
-/// Config that has passed validation.
-///
-/// Generally this is a copy of [`MachineConfig`] without optional values where we would use defaults.
-#[derive(Clone, Debug)]
-pub(crate) struct InternalConfig {
-    pub(crate) client: quinn::ClientConfig,
-    pub(crate) server: quinn::ServerConfig,
-    pub(crate) pki: Psk,
-    pub(crate) external_port: u16,
-    pub(crate) external_ip: Option<IpAddr>,
-    pub(crate) retry_config: Arc<RetryConfig>,
-}
-
-impl InternalConfig {
-    pub(crate) fn try_from_config(config: MachineConfig, pki: Psk) -> Result<Self> {
+impl<Scheme> MachineConfig<Scheme> {
+    // Generates a server config from the machine config. This checks the client certificate is
+    // self-signed by the key which SubjectPublicKeyInfo is passed as an argument.
+    pub fn server_config_for(
+        &self,
+        // DER-encoded public key bytes
+        target_public_key_bytes: &'static [u8],
+    ) -> Result<quinn::ServerConfig> {
         let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
 
-        // let's convert our duration to quinn's IdleTimeout
-        let idle_timeout = config
+        // convert the duration to quinn's IdleTimeout
+        let idle_timeout = self
             .idle_timeout
             .map(IdleTimeout::try_from)
+            // TODO: IdleTImeout caps out at 2^62, we should fallback to some IDLE_TIMEOUT_MAX instead
             .unwrap_or(Ok(default_idle_timeout))
             .map_err(ConfigError::from)?;
-        let keep_alive_interval = config.keep_alive_interval;
+        let keep_alive_interval = self.keep_alive_interval;
+
+        let transport = Self::new_transport_config(idle_timeout, keep_alive_interval);
+
+        let pubkey_verifier = Psk::from_der(target_public_key_bytes)?;
+
+        // setup certificates
+        let cert: Certificate = self.key_material.cert();
+        let key: PrivateKey = self.key_material.key();
+        let server_crypto = rustls::ServerConfig::builder()
+            .with_safe_defaults()
+            .with_client_cert_verifier(Arc::new(pubkey_verifier))
+            .with_single_cert(vec![cert], key)?;
+
+        let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
+        server.transport = transport;
+        Ok(server)
+    }
+
+    // Generates a client config from the machine config. This checks the server certificate is
+    // self-signed by the key which SubjectPublicKeyInfo is passed as an argument.
+    pub fn client_config_for(
+        &self,
+        // DER-encoded public key bytes
+        target_public_key_bytes: &'static [u8],
+    ) -> Result<quinn::ClientConfig> {
+        let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
+
+        // convert our duration to quinn's IdleTimeout
+        let idle_timeout = self
+            .idle_timeout
+            .map(IdleTimeout::try_from)
+            // TODO: IdleTImeout caps out at 2^62, we should fallback to some IDLE_TIMEOUT_MAX instead
+            .unwrap_or(Ok(default_idle_timeout))
+            .map_err(ConfigError::from)?;
+        let keep_alive_interval = self.keep_alive_interval;
 
         let transport = Self::new_transport_config(idle_timeout, keep_alive_interval);
 
         // setup certificates
         let mut roots = rustls::RootCertStore::empty();
-        let (cert, key) = Self::generate_cert(&config.server_name)?;
+
+        let cert: Certificate = self.key_material.cert();
+        let key: PrivateKey = self.key_material.key();
         roots.add(&cert).map_err(|_e| ConfigError::Webpki)?;
 
-        let mut client_crypto = ClientConfig::builder()
+        let pubkey_verifier = Psk::from_der(target_public_key_bytes)?;
+
+        let client_crypto = ClientConfig::builder()
             .with_safe_defaults()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-
-        // TODO: generate the correct certificate on-demand from our private key
-        let mut server = quinn::ServerConfig::with_single_cert(vec![cert], key)?;
-        server.transport = transport.clone();
-
-        // allow client to connect only to known certificates
-        client_crypto
-            .dangerous()
-            .set_certificate_verifier(Arc::new(pki.clone()));
+            .with_custom_certificate_verifier(Arc::new(pubkey_verifier))
+            .with_single_cert(vec![cert], key)?;
 
         let mut client = quinn::ClientConfig::new(Arc::new(client_crypto));
         client.transport = transport;
 
-        Ok(Self {
-            client,
-            server,
-            pki,
-            external_port: config.external_port,
-            external_ip: config.external_ip,
-            retry_config: Arc::new(config.retry_config),
-        })
+        Ok(client)
     }
 
     fn new_transport_config(
@@ -243,16 +324,5 @@ impl InternalConfig {
         let _ = config.keep_alive_interval(keep_alive_interval);
 
         Arc::new(config)
-    }
-
-    fn generate_cert(name: &str) -> Result<(Certificate, rustls::PrivateKey)> {
-        let cert = rcgen::generate_simple_self_signed(vec![name.to_string()])?;
-
-        let key = cert.serialize_private_key_der();
-        let cert = cert.serialize_der().unwrap();
-
-        let key = rustls::PrivateKey(key);
-        let cert = Certificate(cert);
-        Ok((cert, key))
     }
 }

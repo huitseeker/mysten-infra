@@ -18,3 +18,5 @@ serde = { version = "1.0.133", features = ["derive"]}
 thiserror = "1.0.30"
 rustls = { version = "0.20.2", features = ["dangerous_configuration"] }
 rccheck = { path = "../rccheck" }
+anyhow = "1.0.53"
+serde_with = "1.12.0"
