@@ -244,7 +244,7 @@ impl<Scheme> MachineConfig<Scheme> {
     pub fn server_config_for(
         &self,
         // DER-encoded public key bytes
-        target_public_key_bytes: &'static [u8],
+        target_public_key_bytes: &[u8],
     ) -> Result<quinn::ServerConfig> {
         let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
 
@@ -279,7 +279,7 @@ impl<Scheme> MachineConfig<Scheme> {
     pub fn client_config_for(
         &self,
         // DER-encoded public key bytes
-        target_public_key_bytes: &'static [u8],
+        target_public_key_bytes: &[u8],
     ) -> Result<quinn::ClientConfig> {
         let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
 
