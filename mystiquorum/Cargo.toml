@@ -1,0 +1,20 @@
+[package]
+name = "mystiquorum"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Francois Garillot <francois@mystenlabs.com>"]
+description = "a WIP networking crate"
+repository = "https://github.com/mystenlabs/mysten-infra"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+backoff = { version = "0.4.0", features = ["tokio"] }
+quinn = { version = "0.8.0", default-features = false, features = ["tls-rustls"] }
+quinn-proto = "0.8.0"
+rcgen = "0.8.4"
+serde = { version = "1.0.133", features = ["derive"]}
+thiserror = "1.0.30"
+rustls = { version = "0.20.2", features = ["dangerous_configuration"] }
+rccheck = { path = "../rccheck" }
