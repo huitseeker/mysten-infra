@@ -86,7 +86,8 @@ impl Connection {
     /// belongs to. See [`send_with`](Self::send_with) if you want to send a message with specific
     /// configuration.
     pub async fn send(&self, msg: Bytes) -> Result<(), SendError> {
-        self.send_with(msg, 0, None).await
+        self.send_with(msg, 0, self.default_retry_config.as_deref())
+            .await
     }
 
     /// Send a message to the peer using the given configuration.
@@ -415,7 +416,6 @@ async fn listen_on_bi_streams(
 
     let streaming =
         bi_streams.try_for_each_concurrent(None, |(mut send_stream, mut recv_stream)| {
-            let endpoint = &endpoint;
             let message_tx = &message_tx;
             async move {
                 trace!("Handling incoming bi-stream from {}", peer_addr);

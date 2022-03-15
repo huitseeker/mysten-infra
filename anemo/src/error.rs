@@ -7,19 +7,15 @@ use thiserror::Error;
 /// Errors that can occur when sending messages.
 #[derive(Debug, Error)]
 pub enum SendError {
-    /// Failed to serialize message.
-    ///
     /// This likely indicates a bug in the library, since serializing to bytes should be infallible.
     /// Limitations in the serde API mean we cannot verify this statically, and we don't want to
     /// introduce potential panics.
     #[error("Failed to serialize message")]
     Serialization(#[from] SerializationError),
 
-    /// Connection was lost when trying to send a message.
     #[error("Connection was lost when trying to send a message")]
     ConnectionLost(#[from] ConnectionError),
 
-    /// Stream was lost when trying to send a message.
     #[error("Stream was lost when trying to send a message")]
     StreamLost(#[source] StreamError),
 }
@@ -46,15 +42,12 @@ impl From<quinn::WriteError> for SendError {
 /// Errors that can occur when receiving messages.
 #[derive(Debug, Error)]
 pub enum RecvError {
-    /// Failed to deserialize message.
     #[error("Failed to deserialize message")]
     Serialization(#[from] SerializationError),
 
-    /// Connection was lost when trying to receive a message.
     #[error("Connection was lost when trying to receive a message")]
     ConnectionLost(#[from] ConnectionError),
 
-    /// Stream was lost when trying to receive a message.
     #[error("Stream was lost when trying to receive a message")]
     StreamLost(#[source] StreamError),
 }
@@ -118,18 +111,14 @@ impl SerializationError {
 /// Errors that can occur when interacting with streams.
 #[derive(Debug, Error)]
 pub enum StreamError {
-    /// The peer abandoned the stream.
     #[error("The peer abandoned the stream (error code: {0})")]
     Stopped(u64),
 
-    /// The stream was already stopped, finished, or reset.
     #[error("The stream was already stopped, finished, or reset")]
     Gone,
 
-    /// An error was caused by an unsupported operation.
-    ///
     /// Additional stream errors can arise from the use of 0-RTT connections or unordered reads,
-    /// neither of which are supported by the library.
+    /// neither of which we support.
     #[error("An error was caused by an unsupported operation")]
     Unsupported(#[source] UnsupportedStreamOperation),
 }

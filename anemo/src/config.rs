@@ -21,6 +21,7 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// The private key must be DER-encoded ASN.1 in either
 /// PKCS#8 or PKCS#1 format.
+// TODO: move this to rccheck?
 pub trait ToPKCS8 {
     fn to_pkcs8_bytes(&self) -> Vec<u8>;
 }
@@ -224,40 +225,55 @@ pub struct CertificateGenerationError(
 /// Configuration errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// An error occurred when generating the TLS certificate.
     #[error("An error occurred when generating the TLS certificate")]
     CertificateGeneration(#[from] CertificateGenerationError),
-    /// Invalid idle timeout
+
     #[error("An error occurred parsing idle timeout duration")]
     InvalidIdleTimeout(#[from] quinn_proto::VarIntBoundsExceeded),
-    /// rustls error
+
     #[error("An error occurred within rustls")]
     Rustls(#[from] rustls::Error),
-    /// rustls error
-    #[error("An error occurred generaeting client config certificates")]
+
+    #[error("An error occurred generating client config certificates")]
     Webpki,
 }
 
 impl<Scheme> MachineConfig<Scheme> {
+    // convert our duration to quinn's IdleTimeout
+    fn quinn_timeout(opt_timeout: Option<Duration>) -> Result<IdleTimeout> {
+        let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
+
+        opt_timeout
+            .map(IdleTimeout::try_from)
+            // TODO: IdleTImeout caps out at 2^62, we should fallback to some IDLE_TIMEOUT_MAX instead
+            .unwrap_or(Ok(default_idle_timeout))
+            .map_err(ConfigError::from)
+    }
+
+    // set up a TransportConfig from defaults
+    fn default_transport_config(
+        idle_timeout: IdleTimeout,
+        keep_alive_interval: Option<Duration>,
+    ) -> Arc<quinn::TransportConfig> {
+        let mut config = quinn::TransportConfig::default();
+
+        let _ = config.max_idle_timeout(Some(idle_timeout));
+        let _ = config.keep_alive_interval(keep_alive_interval);
+
+        Arc::new(config)
+    }
+
     // Generates a server config from the machine config. This checks the client certificate is
-    // self-signed by the key which SubjectPublicKeyInfo is passed as an argument.
+    // self-signed by the key which SubjectPublicKeyInfo (as bytes) are passed as an argument.
     pub fn server_config_for(
         &self,
         // DER-encoded public key bytes
         target_public_key_bytes: &[u8],
     ) -> Result<quinn::ServerConfig> {
-        let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
-
-        // convert the duration to quinn's IdleTimeout
-        let idle_timeout = self
-            .idle_timeout
-            .map(IdleTimeout::try_from)
-            // TODO: IdleTImeout caps out at 2^62, we should fallback to some IDLE_TIMEOUT_MAX instead
-            .unwrap_or(Ok(default_idle_timeout))
-            .map_err(ConfigError::from)?;
+        let idle_timeout = Self::quinn_timeout(self.idle_timeout)?;
         let keep_alive_interval = self.keep_alive_interval;
 
-        let transport = Self::new_transport_config(idle_timeout, keep_alive_interval);
+        let transport = Self::default_transport_config(idle_timeout, keep_alive_interval);
 
         let pubkey_verifier = Psk::from_der(target_public_key_bytes)?;
 
@@ -275,24 +291,16 @@ impl<Scheme> MachineConfig<Scheme> {
     }
 
     // Generates a client config from the machine config. This checks the server certificate is
-    // self-signed by the key which SubjectPublicKeyInfo is passed as an argument.
+    // self-signed by the key which SubjectPublicKeyInfo (as bytes) are passed as an argument.
     pub fn client_config_for(
         &self,
         // DER-encoded public key bytes
         target_public_key_bytes: &[u8],
     ) -> Result<quinn::ClientConfig> {
-        let default_idle_timeout: IdleTimeout = IdleTimeout::try_from(DEFAULT_IDLE_TIMEOUT)?; // 60s
-
-        // convert our duration to quinn's IdleTimeout
-        let idle_timeout = self
-            .idle_timeout
-            .map(IdleTimeout::try_from)
-            // TODO: IdleTImeout caps out at 2^62, we should fallback to some IDLE_TIMEOUT_MAX instead
-            .unwrap_or(Ok(default_idle_timeout))
-            .map_err(ConfigError::from)?;
+        let idle_timeout = Self::quinn_timeout(self.idle_timeout)?;
         let keep_alive_interval = self.keep_alive_interval;
 
-        let transport = Self::new_transport_config(idle_timeout, keep_alive_interval);
+        let transport = Self::default_transport_config(idle_timeout, keep_alive_interval);
 
         // setup certificates
         let mut roots = rustls::RootCertStore::empty();
@@ -312,17 +320,5 @@ impl<Scheme> MachineConfig<Scheme> {
         client.transport = transport;
 
         Ok(client)
-    }
-
-    fn new_transport_config(
-        idle_timeout: IdleTimeout,
-        keep_alive_interval: Option<Duration>,
-    ) -> Arc<quinn::TransportConfig> {
-        let mut config = quinn::TransportConfig::default();
-
-        let _ = config.max_idle_timeout(Some(idle_timeout));
-        let _ = config.keep_alive_interval(keep_alive_interval);
-
-        Arc::new(config)
     }
 }
