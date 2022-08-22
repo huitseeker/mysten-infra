@@ -234,7 +234,7 @@ fn test_iter() {
 }
 
 #[test]
-fn test_iter_prev() {
+fn test_iter_next_back() {
     let db = DBMap::open(temp_dir(), None, None).expect("Failed to open storage");
 
     db.insert(&1, &"1".to_string()).expect("Failed to insert");
@@ -242,10 +242,10 @@ fn test_iter_prev() {
     db.insert(&3, &"3".to_string()).expect("Failed to insert");
 
     let mut iter = db.iter().skip_to_last();
-    assert_eq!(Some((3, "3".to_string())), iter.prev());
-    assert_eq!(Some((2, "2".to_string())), iter.prev());
-    assert_eq!(Some((1, "1".to_string())), iter.prev());
-    assert_eq!(None, iter.prev());
+    assert_eq!(Some((3, "3".to_string())), iter.next_back());
+    assert_eq!(Some((2, "2".to_string())), iter.next_back());
+    assert_eq!(Some((1, "1".to_string())), iter.next_back());
+    assert_eq!(None, iter.next_back());
 }
 
 #[test]
