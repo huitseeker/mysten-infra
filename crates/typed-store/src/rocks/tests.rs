@@ -249,6 +249,25 @@ fn test_iter_next_back() {
 }
 
 #[test]
+fn test_iter_rev() {
+    let db = DBMap::open(temp_dir(), None, None).expect("Failed to open storage");
+
+    db.insert(&1, &"1".to_string()).expect("Failed to insert");
+    db.insert(&2, &"2".to_string()).expect("Failed to insert");
+    db.insert(&3, &"3".to_string()).expect("Failed to insert");
+
+    let iter = db.iter().rev();
+    assert_eq!(
+        vec![
+            (3, "3".to_string()),
+            (2, "2".to_string()),
+            (1, "1".to_string())
+        ],
+        iter.collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_keys() {
     let db = DBMap::open(temp_dir(), None, None).expect("Failed to open storage");
 
